@@ -37,8 +37,6 @@ def ohe(data, fit, transform, params, cols=None):
 		del params[:]
 		params.append(_feature_vals)
 		params.append(_ohe)
-		
-		return data
 	
 	if transform:
 		if not fit:
@@ -53,6 +51,8 @@ def ohe(data, fit, transform, params, cols=None):
 		else:
 			_cols = [x for x in range(data.shape[1]) if x not in cols]
 			return sparse.hstack([_ohe.fit_transform(data[:,cols]), sparse.csr_matrix(data[:,_cols].astype(float))])
+	
+	return data
 
 def dateSplit(date):
 	# FORMAT: YYYY-MM-DD
@@ -72,7 +72,7 @@ def evalScore_xg(y_pred, y):
 	# y = y.values
 	y = np.array(y.get_label()).astype(float)
 	y_pred = np.array(y_pred).astype(float)
-	return math.sqrt(sum(((y[y!=0]-y_pred[y!=0])/y[y!=0])*((y[y!=0]-y_pred[y!=0])/y[y!=0]))/len(y[y!=0]))
+	return "rmspe", math.sqrt(sum(((y[y!=0]-y_pred[y!=0])/y[y!=0])*((y[y!=0]-y_pred[y!=0])/y[y!=0]))/len(y[y!=0]))
 
 ### Load Data
 def read(filename):
@@ -309,22 +309,22 @@ def storeInfo(data):
 			_promo2.append(0)
 	_store_attrs = np.array([store[int(x[0])-1, [1,2]] for x in _data])
 	_comp_dist = np.array([store[int(x[0])-1, 3] for x in _data])
-	_v = np.c_[np.array(_store_attrs), np.array(_promo2)[np.newaxis].T]
+	## _v = np.c_[np.array(_store_attrs), np.array(_promo2)[np.newaxis].T]
 	# _v = np.c_[_v, store[:,[4,5]]]
 	# _v = np.c_[_v, store[:,[7,8,9]]]
-	_v = np.c_[_v, np.array(_comp)[np.newaxis].T]
-	_v = np.c_[_v, _comp_dist]
+	## _v = np.c_[_v, np.array(_comp)[np.newaxis].T]
+	## _v = np.c_[_v, _comp_dist]
 	
 	### sales | cust info
 	_mf_features = custInfo()
 	_mff = np.array([_mf_features[int(x[0])-1, :] for x in _data])
-	_v = np.c_[_v, _mff]
+	## _v = np.c_[_v, _mff]
 	
 	### past sales info
 	_past = pastInfo(np.c_[data[:,0], np.asarray(zip(*_data)[1]), data[:,4]])
-	_v = np.c_[_v, _past]
+	## _v = np.c_[_v, _past]
 	
-	return _v
+	return np.c_[np.array(_store_attrs), np.array(_promo2)[np.newaxis].T, np.array(_comp)[np.newaxis].T, _comp_dist, _mff, _past]
 
 def custInfo():
 	inp = open('matx.pkl', 'rb')
@@ -335,8 +335,11 @@ def custInfo():
 	
 	trun = decomposition.TruncatedSVD(n_components=20, algorithm='arpack', n_iter=0, random_state=0, tol=0.0)
 	_r = trun.fit_transform(r)
+	print "Ratio var explained: "+str(sum(trun.explained_variance_ratio_))
 	_s = trun.fit_transform(s)
+	print "Sales var explained: "+str(sum(trun.explained_variance_ratio_))
 	_c = trun.fit_transform(c)
+	print "Custs var explained: "+str(sum(trun.explained_variance_ratio_))
 	
 	return np.c_[_r, _s, _c]
 
@@ -370,10 +373,6 @@ def pastInfo(data):
 		_res[i,0:_n-counter+1] = int(_avg)
 		_res[i,_n-counter+1:_n] = _data[i-counter+1:i,2].astype(float)
 	
-	_bins = [200*(i+1) for i in range(100)]
-	for i in range(_res.shape[1]):
-		_res[:,i] = np.digitize(_res[:,i], _bins)
-	
 	_dates = {x: i for i, x in enumerate(sorted(np.unique(_data[:,1])))}
 	_dates_ = {i: x for i, x in enumerate(sorted(np.unique(_data[:,1])))}
 	_sales = np.zeros((1115, len(_dates)))
@@ -393,11 +392,21 @@ def pastInfo(data):
 			if _sales[i,j] == 0:
 				if j+5 < len(_dates):
 					_nxt = np.mean(_sales[i,j+1:j+6])
-				if _nxt == 0:
-					_sales[i,j] = int(random.uniform(0,1000)+_sales[i,j-365])
-					continue
+				else:
+					_nxt = np.mean(_sales[i,j:len(_dates)])
 				if j-5 > -1:
 					_ltr = np.mean(_sales[i,j-5:j])
+				else:
+					_ltr = np.mean(_sales[i,0:j+1])
+				if _nxt == 0 and _ltr == 0:
+					_sales[i,j] = 0
+					continue
+				if _nxt == 0:
+					_sales[i,j] = _ltr
+					continue
+				if _ltr == 0:
+					_sales[i,j] = _nxt
+					continue
 				_sales[i,j] = int(np.mean([_nxt,_ltr]))
 	
 	_mod_sales = np.zeros((1115, len(_dates)+10))
@@ -424,10 +433,32 @@ def pastInfo(data):
 		if j-10 < 0:
 			_res_y[i, :j] = np.mean(_sales[_id, :10])
 			_res_y[i, j:20] = _sales[_id, :20-j]
-		else: 
+		else:
 			_res_y[i] = _mod_sales[_id, j-10:j+10]
 	
-	return np.c_[_res, _res_y].astype(int)
+	_res = np.concatenate((_res, _res_y), axis=1).astype(int)
+	_bins = [150*(i+1) for i in range(125)]
+	for i in range(_res.shape[1]):
+		_res[:,i] = np.digitize(_res[:,i], _bins)
+	
+	return _res
+
+def movingAvg(data, window):
+	_avg = np.zeros(len(data))
+	for i in range(len(data)):
+		if i-window/2 > 0:
+			_strt = i-window/2
+		else:
+			_strt = 0
+		
+		if i+window/2 < len(data):
+			_end = i+window/2
+		else:
+			_end = len(data)
+		
+		_avg[i] = np.mean(data[_strt:_end+1])
+	
+	return _avg
 
 _train_data = map(dateSplit, train[:,2])
 _train = np.c_[np.array(_train_data), train[:,[1,5,6,7,8]]]			 # YEAR | MONTH | DAY | WEEKDAY | OPEN | PROMO | STHLDY | SCHLDY
@@ -550,35 +581,35 @@ _split_CV, _shuffle_idx_CV = split_col(np.c_[ID_CV, X_CV.A, y_CV], 0)
 ############################################################
 
 ### CF - Single
-_prev_train = 0
-_prev_CV = 0
-
-_y_pred_train = np.ones(train_size)
-_y_pred_CV = np.ones(cv_size)
-
-_cf_models = [None]*len(_split_train)
-_alphas = [0]*len(_split_train)
-for i, store_data in enumerate(_split_train):
-	_store_id = int(store_data[0,0])
-	print "Store ID: "+str(_store_id)
-	_shuffle_idx_train_store = _shuffle_idx_train[_prev_train : _prev_train +len(store_data)]
-	_shuffle_idx_CV_store = _shuffle_idx_CV[_prev_CV : _prev_CV +len(_split_CV[i])]
-	_prev_train += len(_shuffle_idx_train_store)
-	_prev_CV += len(_shuffle_idx_CV_store)
-	
-	ridge = linear_model.RidgeCV(alphas=[ 0.03, 0.1, 0.3, 1., 3.0, 10., 30], fit_intercept=True, normalize=False, scoring=None, cv=None, gcv_mode=None, store_cv_values=True)
-	ridge.fit(store_data[:,1:-2], y_train[_shuffle_idx_train_store,0] - y_pred_train[_shuffle_idx_train_store])
-	
-	_y_pred_train[_shuffle_idx_train_store] = ridge.predict(store_data[:,1:-2])
-	_y_pred_CV[_shuffle_idx_CV_store] = ridge.predict(_split_CV[i][:,1:-2])
-	
-	_alphas[_store_id-1] = ridge.alpha_
-	_cf_models[_store_id-1] = ridge
-
-y_pred_train += _y_pred_train
-y_pred_CV += _y_pred_CV
-print "CF Train Score: "+str(evalScore(y_train[:,0], y_pred_train))
-print "CF CV Score: "+str(evalScore(y_CV[:,0], y_pred_CV))
+# _prev_train = 0
+# _prev_CV = 0
+# 
+# _y_pred_train = np.ones(train_size)
+# _y_pred_CV = np.ones(cv_size)
+# 
+# _cf_models = [None]*len(_split_train)
+# _alphas = [0]*len(_split_train)
+# for i, store_data in enumerate(_split_train):
+# 	_store_id = int(store_data[0,0])
+# 	print "Store ID: "+str(_store_id)
+# 	_shuffle_idx_train_store = _shuffle_idx_train[_prev_train : _prev_train +len(store_data)]
+# 	_shuffle_idx_CV_store = _shuffle_idx_CV[_prev_CV : _prev_CV +len(_split_CV[i])]
+# 	_prev_train += len(_shuffle_idx_train_store)
+# 	_prev_CV += len(_shuffle_idx_CV_store)
+# 	
+# 	ridge = linear_model.RidgeCV(alphas=[ 0.03, 0.1, 0.3, 1., 3.0, 10., 30], fit_intercept=True, normalize=False, scoring=None, cv=None, gcv_mode=None, store_cv_values=True)
+# 	ridge.fit(store_data[:,1:-2], y_train[_shuffle_idx_train_store,0] - y_pred_train[_shuffle_idx_train_store])
+# 	
+# 	_y_pred_train[_shuffle_idx_train_store] = ridge.predict(store_data[:,1:-2])
+# 	_y_pred_CV[_shuffle_idx_CV_store] = ridge.predict(_split_CV[i][:,1:-2])
+# 	
+# 	_alphas[_store_id-1] = ridge.alpha_
+# 	_cf_models[_store_id-1] = ridge
+# 
+# y_pred_train += _y_pred_train
+# y_pred_CV += _y_pred_CV
+# print "CF Train Score: "+str(evalScore(y_train[:,0], y_pred_train))
+# print "CF CV Score: "+str(evalScore(y_CV[:,0], y_pred_CV))
 
 ### CF - Whole
 # ridge = linear_model.RidgeCV(alphas=[ 0.1, 1., 10. ], fit_intercept=True, 
@@ -629,14 +660,14 @@ for i, store_data in enumerate(_split_train):
 	dtrain = xgb.DMatrix(np.array(store_data[:,1:-2]), label = y_train[_shuffle_idx_train_store,0] - y_pred_train[_shuffle_idx_train_store], feature_names = [str(i) for i in range(store_data[:,1:-2].shape[1])])
 	dcv = xgb.DMatrix(np.array(_split_CV[i][:,1:-2]), label = y_CV[_shuffle_idx_CV_store, 0] - y_pred_CV[_shuffle_idx_CV_store], feature_names = [str(i) for i in range(_split_CV[i][:,1:-2].shape[1])])
 	params = {'silent':1, 'objective':'reg:linear', 'subsample':0.5, 'bst:eta':0.1}
-	params = {'silent':1, 'objective':'reg:linear', 'subsample':0.5, 'eta':0.1, 'colsample_bytree':1.0, 'max_depth':6}
+	params = {'silent':1, 'objective':'reg:linear', 'subsample':0.7, 'eta':0.1, 'colsample_bytree':0.9, 'max_depth':6}
 	evallist = [(dtrain,'train'), (dcv,'cv')]
 	
-	# xgb.cv(params, dtrain, num_boost_round=100, nfold=3, metrics=(), obj=None, feval=None,
-	# 	fpreproc=None, as_pandas=False, show_progress=None, show_stdv=True, seed=0)
+	# mdl = xgb.cv(params, dtrain, num_boost_round=100, nfold=3, metrics=(), obj=None, feval=None,
+	# 	fpreproc=None, as_pandas=False, show_progress=True, show_stdv=True, seed=0)
 	
 	mdl = xgb.train(params, dtrain, num_boost_round=100, evals=evallist, obj=None,
-		feval=None, early_stopping_rounds=10, evals_result=None, verbose_eval=False)
+		feval=evalScore_xg, early_stopping_rounds=10, evals_result=None, verbose_eval=False)
 	
 	_y_pred_train[_shuffle_idx_train_store] = mdl.predict(dtrain, ntree_limit=mdl.best_iteration)
 	_y_pred_CV[_shuffle_idx_CV_store] = mdl.predict(dcv, ntree_limit=mdl.best_iteration)
@@ -654,14 +685,14 @@ print "CF CV Score: "+str(evalScore(y_CV[:,0], y_pred_CV))
 
 ### XGB - Whole
 dtrain = xgb.DMatrix(X_train, label = y_train[:,0] - (y_pred_train), feature_names = [str(i) for i in range(X_train.shape[1])])
-dcv = xgb.DMatrix(X_CV, label = y_CV[:, 0] - (y_pred_CV), feature_names = [str(i) for i in range(X_CV.shape[1])])
-params = {'silent':1, 'objective':'reg:linear', 'subsample':0.7, 'eta':0.3, 'colsample_bytree':0.7, 'max_depth':6}
+dcv = xgb.DMatrix(X_CV, label = y_CV[:,0] - (y_pred_CV), feature_names = [str(i) for i in range(X_CV.shape[1])])
+params = {'silent':1, 'objective':'reg:linear', 'subsample':0.4, 'eta':0.3, 'colsample_bytree':0.8, 'max_depth':6}
 evallist = [(dtrain,'train'), (dcv,'cv')]
 
 # xgb.cv(params, dtrain, num_boost_round=100, nfold=3, metrics=(), obj=None, feval=None,
 # 	fpreproc=None, as_pandas=False, show_progress=None, show_stdv=True, seed=0)
 
-mdl = xgb.train(params,dtrain,num_boost_round=20,evals=evallist,obj=None,feval=None,early_stopping_rounds=None,evals_result=None,verbose_eval=True)
+mdl = xgb.train(params,dtrain,num_boost_round=20,evals=evallist,obj=None,feval=evalScore_xg,early_stopping_rounds=None,evals_result=None,verbose_eval=True)
 _y_pred_train = mdl.predict(dtrain)
 _y_pred_CV = mdl.predict(dcv)
 
@@ -684,6 +715,20 @@ print "CF CV Score: "+str(evalScore(y_CV[:,0], y_pred_CV+_y_pred_CV))
 # y_pred_CV += _y_pred_CV
 # print "Fine Train Score: "+str(evalScore(y_train[:,0], y_pred_train))
 # print "Fine CV Score: "+str(evalScore(y_CV[:,0], y_pred_CV))
+
+### NN
+from sknn import mlp
+params = {'learning_rule':u'sgd', 'learning_rate':0.001, 'learning_momentum':0.5, 'regularize':'L2', 'weight_deca':0.00001, 
+			'dropout_rate':None, 'batch_size':30}
+layers = [mlp.Layer("Tanh", units=200), mlp.Layer("Tanh", units=200), mlp.Layer("Linear")]
+nn = mlp.Regressor(layers, learning_rule=u'sgd', learning_rate=0.01, learning_momentum=None, regularize='L2', weight_decay=0.03, 
+			dropout_rate=None, batch_size=300, n_iter=10, n_stable=50, f_stable=0.001, valid_set=None, valid_size=0.15, loss_type=u'mse',
+			mutator=None, debug=True, verbose=True, random_state=2389)
+nn = nn.fit(X_train, y_train[:,0])
+_y_pred_train_nn = nn.predict(X_train)[0]
+_y_pred_CV_nn = nn.predict(X_CV)[0]
+print "CF Train Score: "+str(evalScore(y_train[:,0], _y_pred_train+_y_pred_train_nn))
+print "CF CV Score: "+str(evalScore(y_CV[:,0], _y_pred_CV+_y_pred_CV_nn))
 
 ### Submission
 _split_test, _shuffle_idx_test = split_col(np.c_[ID_test, X_test.A, np.zeros((test_size,2))], 0)
